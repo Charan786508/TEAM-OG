@@ -1,0 +1,344 @@
+import pygame
+import random
+import time
+import csv
+
+# ---------------------- Initialization ----------------------
+pygame.init()
+pygame.mixer.init()  # Initialize mixer for beep
+
+# Load beep sound
+beep_sound = pygame.mixer.Sound("beep.wav")  # Make sure beep.wav is in the same folder
+
+# Screen settings
+WIDTH, HEIGHT = 900, 600
+WIN = pygame.display.set_mode((WIDTH, HEIGHT))
+pygame.display.set_caption("Smart Traffic Signal Simulation")
+
+# Colors
+WHITE = (255, 255, 255)
+RED = (255, 0, 0)
+GREEN = (0, 255, 0)
+YELLOW = (255, 255, 0)
+BLACK = (0, 0, 0)
+BLUE = (0, 0, 255)
+GRAY = (200, 200, 200)
+
+# Car settings
+CAR_WIDTH, CAR_HEIGHT = 30, 50
+
+# ---------------------- Lanes ----------------------
+lanes = {
+    "N": {"x": WIDTH//2 - 50, "y": 0, "cars": [], "spawn_prob": 0.02},
+    "S": {"x": WIDTH//2 + 20, "y": HEIGHT-60, "cars": [], "spawn_prob": 0.02},
+    "E": {"x": WIDTH-60, "y": HEIGHT//2 + 20, "cars": [], "spawn_prob": 0.02},
+    "W": {"x": 0, "y": HEIGHT//2 - 50, "cars": [], "spawn_prob": 0.02}
+}
+
+# Traffic lights
+lights = {"N": RED, "S": RED, "E": RED, "W": RED}
+green_lane = "N"
+lights[green_lane] = GREEN
+
+# Pedestrian lights (squares)
+pedestrian_lights = {
+    "top_left": {"pos": (WIDTH//2 - 120, HEIGHT//2 - 120), "state": GREEN},
+    "top_right": {"pos": (WIDTH//2 + 120, HEIGHT//2 - 120), "state": GREEN},
+    "bottom_left": {"pos": (WIDTH//2 - 120, HEIGHT//2 + 120), "state": GREEN},
+    "bottom_right": {"pos": (WIDTH//2 + 120, HEIGHT//2 + 120), "state": GREEN}
+}
+
+# Lane to pedestrian mapping
+lane_to_ped = {
+    "N": ["top_left", "top_right"],
+    "S": ["bottom_left", "bottom_right"],
+    "E": ["top_right", "bottom_right"],
+    "W": ["top_left", "bottom_left"]
+}
+
+# Stats
+cars_passed = {"N": 0, "S": 0, "E": 0, "W": 0}
+waiting_times = []
+
+# Timing
+clock = pygame.time.Clock()
+last_switch = time.time()
+green_duration = 5
+yellow_duration = 3
+signal_state = "green"   # "green", "yellow_after", "yellow_before"
+next_green_lane = None
+yellow_start_time = 0
+
+# ---------------------- Helper Functions ----------------------
+def draw_dashed_line(surface, color, start_pos, end_pos, width=2, dash_length=15):
+    x1, y1 = start_pos
+    x2, y2 = end_pos
+    if x1 == x2:  # vertical
+        step = dash_length*2 if y2>y1 else -dash_length*2
+        for y in range(y1, y2, step):
+            pygame.draw.line(surface, color, (x1, y), (x1, min(y+dash_length, y2) if y2>y1 else max(y-dash_length, y2)), width)
+    else:  # horizontal
+        step = dash_length*2 if x2>x1 else -dash_length*2
+        for x in range(x1, x2, step):
+            pygame.draw.line(surface, color, (x, y1), (min(x+dash_length, x2) if x2>x1 else max(x-dash_length, x2), y1), width)
+
+def in_intersection(car):
+    return (WIDTH//2 - 100 < car["x"] < WIDTH//2 + 100) and (HEIGHT//2 - 100 < car["y"] < HEIGHT//2 + 100)
+
+# ---------------------- Draw Window ----------------------
+def draw_window():
+    WIN.fill(WHITE)
+
+    # Roads
+    pygame.draw.rect(WIN, GRAY, (WIDTH//2 - 100, 0, 200, HEIGHT))
+    pygame.draw.rect(WIN, GRAY, (0, HEIGHT//2 - 100, WIDTH, 200))
+
+    # Lane markings
+    for y in range(0, HEIGHT, 40):
+        pygame.draw.line(WIN, WHITE, (WIDTH//2 - 25, y), (WIDTH//2 - 25, y+20), 5)
+        pygame.draw.line(WIN, WHITE, (WIDTH//2 + 25, y), (WIDTH//2 + 25, y+20), 5)
+    for x in range(0, WIDTH, 40):
+        pygame.draw.line(WIN, WHITE, (x, HEIGHT//2 - 25), (x+20, HEIGHT//2 - 25), 5)
+        pygame.draw.line(WIN, WHITE, (x, HEIGHT//2 + 25), (x+20, HEIGHT//2 + 25), 5)
+
+    # Cars
+    for lane, data in lanes.items():
+        for car in data["cars"]:
+            pygame.draw.rect(WIN, car["color"], (car["x"], car["y"], CAR_WIDTH, CAR_HEIGHT))
+
+    # Traffic lights
+    offset = 80
+    pygame.draw.circle(WIN, lights["N"], (WIDTH//2, HEIGHT//2 - offset), 15)
+    pygame.draw.circle(WIN, lights["S"], (WIDTH//2, HEIGHT//2 + offset), 15)
+    pygame.draw.circle(WIN, lights["E"], (WIDTH//2 + offset, HEIGHT//2), 15)
+    pygame.draw.circle(WIN, lights["W"], (WIDTH//2 - offset, HEIGHT//2), 15)
+
+    # Pedestrian dashed lines
+    line_width = 8
+    draw_dashed_line(WIN, WHITE, (WIDTH//2 - 100, HEIGHT//2 - 110), (WIDTH//2 + 100, HEIGHT//2 - 110), line_width)
+    draw_dashed_line(WIN, WHITE, (WIDTH//2 - 100, HEIGHT//2 + 110), (WIDTH//2 + 100, HEIGHT//2 + 110), line_width)
+    draw_dashed_line(WIN, WHITE, (WIDTH//2 - 110, HEIGHT//2 - 100), (WIDTH//2 - 110, HEIGHT//2 + 100), line_width)
+    draw_dashed_line(WIN, WHITE, (WIDTH//2 + 110, HEIGHT//2 - 100), (WIDTH//2 + 110, HEIGHT//2 + 100), line_width)
+
+    # Pedestrian lights (squares)
+    square_size = 20
+    for ped in pedestrian_lights.values():
+        pygame.draw.rect(WIN, ped["state"], (ped["pos"][0]-square_size//2, ped["pos"][1]-square_size//2, square_size, square_size))
+
+    # Dashboard
+    font = pygame.font.SysFont("Arial", 18, bold=True)
+    dashboard = pygame.Surface((250, HEIGHT))
+    dashboard.fill((240, 240, 240))
+    WIN.blit(dashboard, (WIDTH-250, 0))
+    title = font.render("Traffic Dashboard", True, BLACK)
+    WIN.blit(title, (WIDTH-230, 20))
+
+    # Lane info
+    y_offset = 60
+    max_cars = max(len(lanes[l]["cars"]) for l in lanes) or 1
+    for lane in ["N", "S", "E", "W"]:
+        count = len(lanes[lane]["cars"])
+        text = font.render(f"{lane}: {count} cars", True, BLACK)
+        WIN.blit(text, (WIDTH-230, y_offset))
+
+        bar_width = int((count / max_cars) * 150)
+        bar_color = lights[lane]
+        pygame.draw.rect(WIN, bar_color, (WIDTH-80, y_offset+5, bar_width, 15))
+
+        if count > 8:
+            jam_text = font.render("🚨 Jam!", True, RED)
+            WIN.blit(jam_text, (WIDTH-230, y_offset + 20))
+
+        y_offset += 35
+
+    active_text = font.render(f"Green Lane: {green_lane}", True, GREEN)
+    WIN.blit(active_text, (WIDTH-230, y_offset+10))
+    state_text = font.render(f"Signal State: {signal_state}", True, BLACK)
+    WIN.blit(state_text, (WIDTH-230, y_offset+40))
+
+    pygame.display.update()
+
+# ---------------------- Car Functions ----------------------
+def spawn_cars():
+    for lane, data in lanes.items():
+        if random.random() < data["spawn_prob"]:
+            car = {"x": data["x"], "y": data["y"], "color": BLUE, "waiting": 0, "crossed_line": False}
+            data["cars"].append(car)
+
+def move_cars():
+    global green_lane, signal_state
+    stop_lines = {
+        "N": HEIGHT//2 - 110 - CAR_HEIGHT,
+        "S": HEIGHT//2 + 110,
+        "E": WIDTH//2 + 110,
+        "W": WIDTH//2 - 110 - CAR_WIDTH
+    }
+
+    for lane, data in lanes.items():
+        for car in data["cars"]:
+            # Default speed
+            speed = 0
+
+            # Check if car has crossed pedestrian line
+            if lane == "N" and car["y"] >= stop_lines["N"]:
+                car["crossed_line"] = True
+            elif lane == "S" and car["y"] <= stop_lines["S"]:
+                car["crossed_line"] = True
+            elif lane == "E" and car["x"] <= stop_lines["E"]:
+                car["crossed_line"] = True
+            elif lane == "W" and car["x"] >= stop_lines["W"]:
+                car["crossed_line"] = True
+
+            # Cars that crossed the line ignore traffic lights
+            if car["crossed_line"]:
+                speed = 3
+            else:
+                # Determine if car reached pedestrian stop line
+                if lane == "N":
+                    reached_line = car["y"] >= stop_lines["N"]
+                elif lane == "S":
+                    reached_line = car["y"] <= stop_lines["S"]
+                elif lane == "E":
+                    reached_line = car["x"] <= stop_lines["E"]
+                elif lane == "W":
+                    reached_line = car["x"] >= stop_lines["W"]
+
+                if not reached_line:
+                    if lane == green_lane:
+                        if signal_state == "green":
+                            speed = 3
+                        elif "yellow" in signal_state:
+                            speed = 1
+                        else:
+                            speed = 0
+                    else:
+                        speed = 0
+                else:
+                    speed = 3
+
+            if lane == "N": car["y"] += speed
+            elif lane == "S": car["y"] -= speed
+            elif lane == "E": car["x"] -= speed
+            elif lane == "W": car["x"] += speed
+
+            if speed == 0:
+                car["waiting"] += 1
+
+        # Remove cars out of screen
+        for car in data["cars"][:]:
+            if car["y"] > HEIGHT or car["y"] < -CAR_HEIGHT or car["x"] > WIDTH or car["x"] < -CAR_WIDTH:
+                data["cars"].remove(car)
+                cars_passed[lane] += 1
+                waiting_times.append(car["waiting"] * 0.03)
+
+# ---------------------- AI Logic ----------------------
+def ai_decision():
+    global next_green_lane, green_duration
+    next_green_lane = max(lanes, key=lambda l: len(lanes[l]["cars"]))
+    count = len(lanes[next_green_lane]["cars"])
+    if count == 0:
+        green_duration = 3
+    elif count > 8:
+        green_duration = 10
+    else:
+        green_duration = 4 + count // 2
+
+# ---------------------- Pedestrian Logic ----------------------
+def update_pedestrian_lights():
+    for key in pedestrian_lights:
+        pedestrian_lights[key]["state"] = RED  
+
+    perpendicular_ped = {
+        "N": ["top_left", "top_right"],    
+        "S": ["bottom_left", "bottom_right"],
+        "E": ["top_right", "bottom_right"], 
+        "W": ["top_left", "bottom_left"]
+    }
+
+    if signal_state == "green":
+        for ped in perpendicular_ped[green_lane]:
+            if pedestrian_lights[ped]["state"] != GREEN:
+                pedestrian_lights[ped]["state"] = GREEN
+                beep_sound.play()  # play beep.wav
+
+    stop_lines = {
+        "N": HEIGHT//2 - 110 - CAR_HEIGHT,
+        "S": HEIGHT//2 + 110,
+        "E": WIDTH//2 + 110,
+        "W": WIDTH//2 - 110 - CAR_WIDTH
+    }
+
+    for lane, ped_keys in lane_to_ped.items():
+        cars_stopped = True
+        for car in lanes[lane]["cars"]:
+            if lane == "N" and car["y"] < stop_lines["N"]:
+                cars_stopped = False
+                break
+            elif lane == "S" and car["y"] > stop_lines["S"]:
+                cars_stopped = False
+                break
+            elif lane == "E" and car["x"] > stop_lines["E"]:
+                cars_stopped = False
+                break
+            elif lane == "W" and car["x"] < stop_lines["W"]:
+                cars_stopped = False
+                break
+        if cars_stopped:
+            for ped in ped_keys:
+                pedestrian_lights[ped]["state"] = GREEN
+                beep_sound.play()
+
+# ---------------------- Save Stats ----------------------
+def save_stats():
+    with open("traffic_stats.csv", "w", newline="") as file:
+        writer = csv.writer(file)
+        writer.writerow(["Lane", "Cars Passed"])
+        for lane, count in cars_passed.items():
+            writer.writerow([lane, count])
+        avg_wait = sum(waiting_times)/len(waiting_times) if waiting_times else 0
+        writer.writerow(["Average Waiting Time (s)", avg_wait])
+        writer.writerow(["Last Green Lane", green_lane])
+        writer.writerow(["Green Duration (s)", green_duration])
+
+# ---------------------- Main Loop ----------------------
+running = True
+while running:
+    clock.tick(30)
+    current_time = time.time()
+
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            running = False
+
+    spawn_cars()
+    move_cars()
+
+    if signal_state == "green" and current_time - last_switch >= green_duration:
+        signal_state = "yellow_after"
+        yellow_start_time = time.time()
+    elif signal_state == "yellow_after" and current_time - yellow_start_time >= yellow_duration:
+        ai_decision()
+        signal_state = "yellow_before"
+        yellow_start_time = time.time()
+    elif signal_state == "yellow_before" and current_time - yellow_start_time >= yellow_duration:
+        signal_state = "green"
+        green_lane = next_green_lane
+        last_switch = time.time()
+        update_pedestrian_lights()
+
+    for l in lights:
+        if l == green_lane and signal_state == "green":
+            lights[l] = GREEN
+        elif l == green_lane and "yellow" in signal_state:
+            if int((time.time() - yellow_start_time) * 2) % 2 == 0:
+                lights[l] = YELLOW
+            else:
+                lights[l] = BLACK
+        else:
+            lights[l] = RED
+
+    update_pedestrian_lights()
+    draw_window()
+
+save_stats()
+pygame.quit()
